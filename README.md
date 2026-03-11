@@ -81,15 +81,19 @@ For detailed information and plug-and-play instructions, see the **[dataloaders/
 ## Dataset Labels
 
 To simplify the training objective, the data is labeled so the model can be conditioned on **classes** rather than raw captions. 
+These were obtained by sentence embedding the captions and clustering them. In total, there are 48 classes + 1 noise category (ID -1). Below are some samples:
+- Shoes
+- Aircraft
+- Firearms
+- Barrels
+- Furniture
+- Cups
+- Robots
 
-### Clustering Pipeline
-1. **Embedding:** Captions were embedded using `gte-Qwen2-1.5B-instruct`.
-2. **Reduction:** Dimensionality reduction via **UMAP**.
-3. **Clustering:** Cluster recognition via **HDBSCAN**.
+### How to Use
+* `object_labels/cluster_summary.txt`: provides a human-readable overview of classes with names and samples
+* `object_labels/object_to_class.json`: maps specific object IDs to assigned classes (eg. 1876/9374307 -> 23)
 
-### Reference Files
-* `object_classification/cluster_summary.txt`: Overview of all generated classes.
-* `object_classification/object_to_class.json`: Mapping of specific Object IDs to assigned classes.
 ## Interactive 3DGS Viewer
 
 We provide a production-ready web viewer for exploring and visualizing 3DGS data. Perfect for:
