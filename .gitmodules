@@ -1,3 +1,6 @@
 [submodule "spark"]
-	path = spark
+	path = submodules/spark
 	url = https://github.com/sparkjsdev/spark.git
+[submodule "submodules/gaussian-splatting"]
+	path = submodules/gaussian-splatting
+	url = https://github.com/graphdeco-inria/gaussian-splatting.git

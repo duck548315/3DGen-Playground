@@ -228,7 +228,18 @@ class Standard3DGenDataset(Dataset):
         ply_path = data_dir / 'point_cloud.ply'
         point_cloud = load_ply(str(ply_path))
         
-        # Apply gs2sphere indexing
+        # gs2sphere maps gaussian_index -> sphere_index. We need sphere order:
+        # sphere_point[sphere_index] = gaussian[gaussian_index] -> use inverse permutation.
+        if gs2sphere.ndim != 1:
+            raise ValueError(f"Expected 1D gs2sphere, got shape {gs2sphere.shape}")
+        if gs2sphere.shape[0] != point_cloud.shape[0]:
+            raise ValueError(
+                f"Point count mismatch: point_cloud={point_cloud.shape[0]} vs gs2sphere={gs2sphere.shape[0]}"
+            )
+        # sphere_to_gs = np.empty_like(gs2sphere)
+        # sphere_to_gs[gs2sphere] = np.arange(gs2sphere.shape[0], dtype=gs2sphere.dtype)
+        # point_cloud = point_cloud[sphere_to_gs]
+
         point_cloud = point_cloud[gs2sphere]
         
         return point_cloud, gs2sphere
@@ -551,4 +562,3 @@ if __name__ == "__main__":
             print(f"  c2w shape: {batch['cameras']['c2w'].shape}")
     
     print("\nDataLoader test completed successfully!")
-

@@ -181,7 +181,7 @@ http://localhost:8000/viewer/index.html?object=9585727
 - Make sure you're using the development server (`python serve.py`)
 - Don't open `index.html` directly in the browser (CORS issues)
 - Check browser console for errors (F12)
-- Verify Spark library is present in `../spark/dist/`
+- Verify Spark library is present in `../submodules/spark/dist/`
 
 ### Issue: Port already in use
 
@@ -211,7 +211,7 @@ viewer/
 
 ### Dependencies
 
-- **Spark**: 3DGS rendering engine (included in `../spark/`)
+- **Spark**: 3DGS rendering engine (included in `../submodules/spark/`)
 - **THREE.js**: 3D graphics library (loaded via CDN)
 - **Python 3.x**: For development server
 

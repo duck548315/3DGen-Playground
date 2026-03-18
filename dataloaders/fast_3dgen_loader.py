@@ -101,10 +101,20 @@ def decode_sample(sample: Dict[str, Any]) -> Dict[str, Any]:
             logging.warning(f"Failed to decode point_cloud.npy for {sample['__key__']}: {e}")
             decoded["point_cloud"] = None
     
-    # Apply gs2sphere indexing to point cloud
+    # Apply gs2sphere mapping to get sphere order point cloud
     if decoded.get("point_cloud") is not None and decoded.get("gs2sphere") is not None:
         try:
-            decoded["point_cloud"] = decoded["point_cloud"][decoded["gs2sphere"]]
+            gs2sphere = decoded["gs2sphere"]
+            point_cloud = decoded["point_cloud"]
+            if gs2sphere.ndim != 1:
+                raise ValueError(f"Expected 1D gs2sphere, got shape {gs2sphere.shape}")
+            if gs2sphere.shape[0] != point_cloud.shape[0]:
+                raise ValueError(
+                    f"Point count mismatch: point_cloud={point_cloud.shape[0]} vs gs2sphere={gs2sphere.shape[0]}"
+                )
+            sphere_to_gs = np.empty_like(gs2sphere)
+            sphere_to_gs[gs2sphere] = np.arange(gs2sphere.shape[0], dtype=gs2sphere.dtype)
+            decoded["point_cloud"] = point_cloud[sphere_to_gs]
         except Exception as e:
             logging.warning(f"Failed to apply gs2sphere indexing for {sample['__key__']}: {e}")
     
@@ -445,4 +455,3 @@ if __name__ == "__main__":
         print(f"\n❌ Error during testing: {e}")
         import traceback
         traceback.print_exc()
-
