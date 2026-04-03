@@ -13,6 +13,7 @@ import json
 import logging
 import io
 import glob
+from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union
 import numpy as np
@@ -62,11 +63,56 @@ def expand_shard_pattern(shard_pattern: str) -> Union[str, List[str]]:
     return shard_pattern
 
 
-def decode_sample(sample: Dict[str, Any]) -> Dict[str, Any]:
+def _validate_sphere2plane(sphere2plane: np.ndarray) -> np.ndarray:
+    """Validate and normalize the sphere-to-plane permutation."""
+    arr = np.asarray(sphere2plane).astype(np.int64, copy=False)
+    if arr.ndim != 1:
+        raise ValueError(f"sphere2plane must be 1D, got shape {arr.shape}")
+    expected = np.arange(arr.shape[0], dtype=arr.dtype)
+    if not np.array_equal(np.sort(arr), expected):
+        raise ValueError("sphere2plane is not a valid permutation")
+    return arr
+
+
+def load_sphere2plane(sphere2plane_path: str) -> np.ndarray:
+    """Load and validate the plane-to-sphere permutation stored in sphere2plane.npy."""
+    return _validate_sphere2plane(np.load(sphere2plane_path))
+
+
+def _reorder_point_cloud_to_plane(
+    point_cloud: np.ndarray,
+    gs2sphere: np.ndarray,
+    sphere2plane: np.ndarray,
+) -> np.ndarray:
+    """Match the standard loader's GaussianVerse mapping in flat plane order."""
+    if point_cloud.ndim != 2:
+        raise ValueError(f"Expected 2D point_cloud, got shape {point_cloud.shape}")
+    if point_cloud.shape[1] < 3:
+        raise ValueError(f"Expected point_cloud with at least 3 columns, got shape {point_cloud.shape}")
+    if gs2sphere.ndim != 1:
+        raise ValueError(f"Expected 1D gs2sphere, got shape {gs2sphere.shape}")
+    if gs2sphere.shape[0] != point_cloud.shape[0]:
+        raise ValueError(
+            f"Point count mismatch: point_cloud={point_cloud.shape[0]} vs gs2sphere={gs2sphere.shape[0]}"
+        )
+    if sphere2plane.shape[0] != point_cloud.shape[0]:
+        raise ValueError(
+            f"sphere2plane has {sphere2plane.shape[0]} entries, expected {point_cloud.shape[0]}"
+        )
+
+    sorted_indices = np.lexsort((point_cloud[:, 2], point_cloud[:, 1], point_cloud[:, 0]))
+    point_cloud = point_cloud[sorted_indices]
+    point_cloud = point_cloud[gs2sphere]
+    point_cloud = point_cloud[sphere2plane]
+    return point_cloud
+
+
+def decode_sample(sample: Dict[str, Any], sphere2plane: np.ndarray) -> Dict[str, Any]:
     """Decode a webdataset sample into usable format.
     
     Args:
         sample: Raw webdataset sample with encoded data
+        sphere2plane: Permutation that maps sphere order to flat plane order
         
     Returns:
         Decoded sample with processed data
@@ -101,22 +147,17 @@ def decode_sample(sample: Dict[str, Any]) -> Dict[str, Any]:
             logging.warning(f"Failed to decode point_cloud.npy for {sample['__key__']}: {e}")
             decoded["point_cloud"] = None
     
-    # Apply gs2sphere mapping to get sphere order point cloud
+    # Match the standard loader's GaussianVerse ordering:
+    # lexsort raw gaussians, apply gs2sphere, then apply sphere2plane.
     if decoded.get("point_cloud") is not None and decoded.get("gs2sphere") is not None:
         try:
-            gs2sphere = decoded["gs2sphere"]
-            point_cloud = decoded["point_cloud"]
-            if gs2sphere.ndim != 1:
-                raise ValueError(f"Expected 1D gs2sphere, got shape {gs2sphere.shape}")
-            if gs2sphere.shape[0] != point_cloud.shape[0]:
-                raise ValueError(
-                    f"Point count mismatch: point_cloud={point_cloud.shape[0]} vs gs2sphere={gs2sphere.shape[0]}"
-                )
-            sphere_to_gs = np.empty_like(gs2sphere)
-            sphere_to_gs[gs2sphere] = np.arange(gs2sphere.shape[0], dtype=gs2sphere.dtype)
-            decoded["point_cloud"] = point_cloud[sphere_to_gs]
+            decoded["point_cloud"] = _reorder_point_cloud_to_plane(
+                point_cloud=decoded["point_cloud"],
+                gs2sphere=decoded["gs2sphere"],
+                sphere2plane=sphere2plane,
+            )
         except Exception as e:
-            logging.warning(f"Failed to apply gs2sphere indexing for {sample['__key__']}: {e}")
+            logging.warning(f"Failed to apply GaussianVerse mapping for {sample['__key__']}: {e}")
     
     # Decode metadata.json - stored as UTF-8 text string in webdataset
     if "metadata.json" in sample:
@@ -246,6 +287,7 @@ def collate_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def create_webdataset(
     shard_pattern: str,
+    sphere2plane: np.ndarray,
     mean: Optional[np.ndarray] = None,
     std: Optional[np.ndarray] = None,
     batch_size: int = 1,
@@ -259,6 +301,7 @@ def create_webdataset(
     Args:
         shard_pattern: Pattern for webdataset shard files (e.g., "shards/gaussianverse-*.tar")
                       Supports glob patterns (*.tar), brace notation ({000..099}.tar), or file lists
+        sphere2plane: Permutation that maps sphere order to flat plane order
         mean: Mean for normalization (optional)
         std: Standard deviation for normalization (optional)
         batch_size: Batch size for processing
@@ -273,6 +316,8 @@ def create_webdataset(
     if not WDS_AVAILABLE:
         raise ImportError("WebDataset is not available. Install with: pip install webdataset")
     
+    sphere2plane = _validate_sphere2plane(sphere2plane)
+
     # Expand glob patterns if necessary
     expanded_pattern = expand_shard_pattern(shard_pattern)
     
@@ -290,8 +335,8 @@ def create_webdataset(
     dataset = (
         dataset
         .decode()
-        .map(decode_sample)
-        .map(lambda sample: process_sample(sample, mean=mean, std=std))
+        .map(partial(decode_sample, sphere2plane=sphere2plane))
+        .map(partial(process_sample, mean=mean, std=std))
     )
     
     # Apply batching using webdataset's batched method
@@ -308,6 +353,8 @@ def create_webdataset(
 
 def create_dataloader(
     shard_pattern: str,
+    sphere2plane: Optional[np.ndarray] = None,
+    sphere2plane_path: str = "data/sphere2plane.npy",
     mean_file: Optional[str] = None,
     std_file: Optional[str] = None,
     batch_size: int = 1,
@@ -327,6 +374,9 @@ def create_dataloader(
                       - Glob patterns: "shards/gaussianverse-*.tar"
                       - Brace notation: "shards/gaussianverse-{000000..000099}.tar"
                       - File lists: ["shard1.tar", "shard2.tar"]
+        sphere2plane: Permutation that maps sphere order to flat plane order.
+                      If not provided, it is loaded from sphere2plane_path.
+        sphere2plane_path: Path to sphere2plane.npy permutation file
         mean_file: Path to GS mean file for normalization (optional)
         std_file: Path to GS std file for normalization (optional)
         batch_size: Batch size for processing
@@ -359,6 +409,12 @@ def create_dataloader(
         >>> # Need to recreate for second pass
         >>> dataset = create_dataloader(..., repeat=False)
     """
+    if sphere2plane is None:
+        logging.info(f"Loading sphere2plane permutation from {sphere2plane_path}")
+        sphere2plane = load_sphere2plane(sphere2plane_path)
+    else:
+        sphere2plane = _validate_sphere2plane(sphere2plane)
+
     # Load normalization statistics if provided
     mean = None
     std = None
@@ -373,6 +429,7 @@ def create_dataloader(
     # Create webdataset with batching
     dataset, loader = create_webdataset(
         shard_pattern=shard_pattern,
+        sphere2plane=sphere2plane,
         mean=mean,
         std=std,
         batch_size=batch_size,
@@ -396,6 +453,8 @@ if __name__ == "__main__":
                        help="Path to mean file for normalization")
     parser.add_argument("--std_file", type=str, default=None,
                        help="Path to std file for normalization")
+    parser.add_argument("--sphere2plane_path", type=str, default="data/sphere2plane.npy",
+                       help="Path to sphere2plane.npy permutation file")
     parser.add_argument("--batch_size", type=int, default=2,
                        help="Batch size")
     parser.add_argument("--num_workers", type=int, default=0,
@@ -415,6 +474,7 @@ if __name__ == "__main__":
     logging.info("Creating Fast3DGen WebDataset...")
     dataset, loader = create_dataloader(
         shard_pattern=args.shard_pattern,
+        sphere2plane_path=args.sphere2plane_path,
         mean_file=args.mean_file,
         std_file=args.std_file,
         batch_size=args.batch_size,

@@ -55,6 +55,8 @@ We provide two types of data loaders for text-to-3D object generation tasks, eac
 
    dataset, dataloader = create_dataloader(
        shard_pattern,        # URL to the preprocessed .tar files. E.g. "/THE/PATH/TO/YOUR/SHARDS/gaussianverse-*.tar"
+       sphere2plane=None,   # Optional in-memory sphere2plane permutation
+       sphere2plane_path,   # Path to sphere2plane.npy when sphere2plane is not passed
        mean_file,       # Path to the GS mean file for normalization
        std_file,        # Path to the GS std file for normalization
        batch_size,      # Number of samples per batch

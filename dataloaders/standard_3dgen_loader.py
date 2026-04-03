@@ -151,6 +151,53 @@ def extract_directory_info(tar_gz_path: str) -> Tuple[str, str]:
     return directory_number, filename
 
 
+def load_sphere2plane(sphere2plane_path: str) -> np.ndarray:
+    """Load and validate the plane-to-sphere permutation stored in sphere2plane.npy."""
+    arr = np.load(sphere2plane_path).astype(np.int64, copy=False)
+    if arr.ndim != 1:
+        raise ValueError(f"sphere2plane must be 1D, got shape {arr.shape}")
+    expected = np.arange(arr.shape[0], dtype=arr.dtype)
+    if not np.array_equal(np.sort(arr), expected):
+        raise ValueError(f"sphere2plane at {sphere2plane_path} is not a valid permutation")
+    return arr
+
+
+def _normalize_point_cloud_numpy(
+    point_cloud: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> np.ndarray:
+    """Normalize a point cloud while preserving its original shape."""
+    mean_arr = np.asarray(mean, dtype=np.float32)
+    std_arr = np.asarray(std, dtype=np.float32)
+
+    if point_cloud.ndim == 2:
+        if mean_arr.ndim == 1:
+            mean_arr = mean_arr[None, :]
+            std_arr = std_arr[None, :]
+        elif mean_arr.ndim == 3 and mean_arr.shape[1:] == (1, 1):
+            mean_arr = mean_arr[:, 0, 0][None, :]
+            std_arr = std_arr[:, 0, 0][None, :]
+        else:
+            raise ValueError(
+                f"Unsupported normalization shape for flat point cloud: mean={mean_arr.shape}, std={std_arr.shape}"
+            )
+    elif point_cloud.ndim == 3:
+        if mean_arr.ndim == 1:
+            mean_arr = mean_arr[:, None, None]
+            std_arr = std_arr[:, None, None]
+        elif mean_arr.ndim == 3:
+            pass
+        else:
+            raise ValueError(
+                f"Unsupported normalization shape for plane point cloud: mean={mean_arr.shape}, std={std_arr.shape}"
+            )
+    else:
+        raise ValueError(f"Unsupported point_cloud shape for normalization: {point_cloud.shape}")
+
+    return (point_cloud - mean_arr) / (std_arr + 1e-8)
+
+
 class Standard3DGenDataset(Dataset):
     """PyTorch Dataset for 3D object generation.
     
@@ -162,11 +209,12 @@ class Standard3DGenDataset(Dataset):
         self,
         obj_list: List[str],
         gs_path: str,
-        caption_path: str,
+        caption_path: Optional[str] = None,
         rendering_path: Optional[str] = None,
         num_images: int = 1,
         mean_file: Optional[str] = None,
         std_file: Optional[str] = None,
+        sphere2plane_path: str = "data/sphere2plane.npy",
     ):
         """Initialize the dataset.
         
@@ -178,19 +226,27 @@ class Standard3DGenDataset(Dataset):
             num_images: Number of images to fetch at each step (only when rendering_path is not None)
             mean_file: Path to downloaded GS mean file
             std_file: Path to downloaded GS std file
+            sphere2plane_path: Path to sphere2plane.npy permutation file
         """
         super().__init__()
         
         self.gs_path = Path(gs_path)
         self.rendering_path = Path(rendering_path) if rendering_path is not None else None
         self.num_images = num_images
+        self.sphere2plane_path = Path(sphere2plane_path)
+        logging.info(f"Loading sphere2plane permutation from {self.sphere2plane_path}")
+        self.sphere2plane = load_sphere2plane(str(self.sphere2plane_path))
+        self.point_cloud_order = "plane"
         
         # Load object list
         self.obj_data = load_obj_list(obj_list)
         self.keys = list(self.obj_data.keys())
         
         # Load captions
-        self.captions = load_captions(caption_path)
+        if caption_path is not None:
+            self.captions = load_captions(caption_path)
+        else:
+            self.captions = {}
         
         # Load normalization statistics if provided
         self.mean = None
@@ -216,7 +272,8 @@ class Standard3DGenDataset(Dataset):
             filename: Filename without extension (e.g., "9611649")
             
         Returns:
-            Tuple of (point_cloud, gs2sphere) as numpy arrays
+            Tuple of (point_cloud, gs2sphere) as numpy arrays in 2D plane order
+            point_cloud: (C, H, W)
         """
         data_dir = self.gs_path / directory_number / filename
         
@@ -227,20 +284,29 @@ class Standard3DGenDataset(Dataset):
         # Load point cloud
         ply_path = data_dir / 'point_cloud.ply'
         point_cloud = load_ply(str(ply_path))
+        sphere2plane = self.sphere2plane
         
-        # gs2sphere maps gaussian_index -> sphere_index. We need sphere order:
-        # sphere_point[sphere_index] = gaussian[gaussian_index] -> use inverse permutation.
+        # gs2sphere maps gaussian index to sphere index. Reorder to sphere order first,
+        # then apply sphere2plane to get the final flat plane ordering.
         if gs2sphere.ndim != 1:
             raise ValueError(f"Expected 1D gs2sphere, got shape {gs2sphere.shape}")
         if gs2sphere.shape[0] != point_cloud.shape[0]:
             raise ValueError(
                 f"Point count mismatch: point_cloud={point_cloud.shape[0]} vs gs2sphere={gs2sphere.shape[0]}"
             )
-        # sphere_to_gs = np.empty_like(gs2sphere)
-        # sphere_to_gs[gs2sphere] = np.arange(gs2sphere.shape[0], dtype=gs2sphere.dtype)
-        # point_cloud = point_cloud[sphere_to_gs]
+        if sphere2plane.shape[0] != point_cloud.shape[0]:
+            raise ValueError(
+                f"sphere2plane has {sphere2plane.shape[0]} entries, expected {point_cloud.shape[0]}"
+            )
 
+        sorted_indices = np.lexsort((point_cloud[:, 2], point_cloud[:, 1], point_cloud[:, 0]))
+        point_cloud = point_cloud[sorted_indices]
         point_cloud = point_cloud[gs2sphere]
+        point_cloud = point_cloud[sphere2plane]
+
+        side = int(np.sqrt(point_cloud.shape[0]))
+        point_cloud = point_cloud.reshape(side, -1, point_cloud.shape[-1])
+        point_cloud = point_cloud.transpose(2, 0, 1)
         
         return point_cloud, gs2sphere
     
@@ -411,7 +477,7 @@ class Standard3DGenDataset(Dataset):
         
         # Normalize if enabled
         if self.mean is not None and self.std is not None:
-            point_cloud = (point_cloud - self.mean[None]) / (self.std[None] + 1e-8)
+            point_cloud = _normalize_point_cloud_numpy(point_cloud, self.mean, self.std)
         
         # Get caption (key is directory/filename without .tar.gz)
         caption_key = tar_gz_path.split('.tar.gz')[0]
@@ -447,11 +513,12 @@ class Standard3DGenDataset(Dataset):
 def create_dataloader(
     obj_list: List[str],
     gs_path: str,
-    caption_path: str,
+    caption_path: Optional[str] = None,
     rendering_path: Optional[str] = None,
     num_images: int = 1,
     mean_file: Optional[str] = None,
     std_file: Optional[str] = None,
+    sphere2plane_path: str = "data/sphere2plane.npy",
     batch_size: int = 1,
     num_workers: int = 0,
     shuffle: bool = True,
@@ -467,6 +534,7 @@ def create_dataloader(
         num_images: Number of images to fetch at each step
         mean_file: Path to downloaded GS mean file (normalization will be applied if provided)
         std_file: Path to downloaded GS std file (normalization will be applied if provided)
+        sphere2plane_path: Path to sphere2plane.npy permutation file
         batch_size: Batch size for DataLoader
         num_workers: Number of workers for data loading
         shuffle: Whether to shuffle the data
@@ -483,6 +551,7 @@ def create_dataloader(
         num_images=num_images,
         mean_file=mean_file,
         std_file=std_file,
+        sphere2plane_path=sphere2plane_path,
     )
     
     dataloader = DataLoader(
@@ -515,6 +584,8 @@ if __name__ == "__main__":
                        help="Path to mean file")
     parser.add_argument("--std_file", type=str, default=None,
                        help="Path to std file")
+    parser.add_argument("--sphere2plane_path", type=str, default="data/sphere2plane.npy",
+                       help="Path to sphere2plane.npy permutation file")
     parser.add_argument("--batch_size", type=int, default=2,
                        help="Batch size")
     parser.add_argument("--num_workers", type=int, default=0,
@@ -533,6 +604,7 @@ if __name__ == "__main__":
         num_images=args.num_images,
         mean_file=args.mean_file,
         std_file=args.std_file,
+        sphere2plane_path=args.sphere2plane_path,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         shuffle=True
