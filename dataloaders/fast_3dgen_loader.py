@@ -149,6 +149,8 @@ def decode_sample(sample: Dict[str, Any], sphere2plane: np.ndarray) -> Dict[str,
     
     # Match the standard loader's GaussianVerse ordering:
     # lexsort raw gaussians, apply gs2sphere, then apply sphere2plane.
+    # do this in make_webdataset, since this make dataloader too slow
+    """
     if decoded.get("point_cloud") is not None and decoded.get("gs2sphere") is not None:
         try:
             decoded["point_cloud"] = _reorder_point_cloud_to_plane(
@@ -158,6 +160,7 @@ def decode_sample(sample: Dict[str, Any], sphere2plane: np.ndarray) -> Dict[str,
             )
         except Exception as e:
             logging.warning(f"Failed to apply GaussianVerse mapping for {sample['__key__']}: {e}")
+    """
     
     # Decode metadata.json - stored as UTF-8 text string in webdataset
     if "metadata.json" in sample:
@@ -172,7 +175,13 @@ def decode_sample(sample: Dict[str, Any], sphere2plane: np.ndarray) -> Dict[str,
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             logging.warning(f"Failed to decode metadata.json for {sample['__key__']}: {e}")
             decoded["metadata"] = {}
-    
+
+    if "caption.txt" in sample:
+        decoded["caption"] = (                         
+            sample["caption.txt"] if isinstance(sample["caption.txt"], str)
+            else sample["caption.txt"].decode("utf-8")
+        )
+        
     return decoded
 
 
@@ -211,7 +220,7 @@ def process_sample(sample: Dict[str, Any], mean: Optional[np.ndarray] = None,
     
     # Extract caption from metadata
     metadata = sample.get("metadata", {})
-    caption = metadata.get("caption", "")
+    caption = sample.get("caption", "")
     
     # Prepare output
     output = {

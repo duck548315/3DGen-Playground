@@ -177,6 +177,7 @@ def find_data_files(gs_path: str, directory_number: str, filename: str) -> Dict[
 def create_webdataset_shards(
     obj_data: Dict[str, str],
     gs_path: str,
+    sphere2plane_path: str,
     captions: Dict[str, str],
     output_dir: str,
     shard_size: int = 1000,
@@ -208,6 +209,7 @@ def create_webdataset_shards(
     
     successful_entries = 0
     failed_entries = 0
+    sphere2plane = np.load(sphere2plane_path)
     
     for shard_idx in tqdm(range(num_shards)):
         start_idx = shard_idx * shard_size
@@ -248,13 +250,19 @@ def create_webdataset_shards(
                     print(file_paths.keys())
                     for file_type, file_path in file_paths.items():
                         if file_path is not None:
+                            if file_type == 'gs2sphere.npy': # we don't need this in shards now
+                                continue
                             with open(file_path, 'rb') as f:
                                 if file_type.endswith('.json'):
                                     # Store JSON as text
                                     sample[file_type] = f.read().decode('utf-8')
                                 elif file_type.endswith('.ply'):
                                     # Convert PLY to numpy array
-                                    sample[file_type[:-4]+'.npy'] = load_ply(file_path)
+                                    pc = load_ply(file_path)
+                                    gs2sphere = np.load(file_paths["gs2sphere.npy"])
+                                    sorted_indices = np.lexsort((pc[:, 2], pc[:, 1], pc[:, 0]))
+                                    sample[file_type[:-4]+'.npy'] = pc[sorted_indices][gs2sphere][sphere2plane]
+
                                 else:
                                     # Store binary files as bytes
                                     sample[file_type] = f.read()
@@ -300,6 +308,12 @@ def main():
         type=str,
         required=True,
         help="Path to the directory containing 3DGS fittings"
+    )
+    parser.add_argument(
+        "--sphere2plane_path",
+        type=str,
+        required=True,
+        help="Path to the directory containing sphere2plane.npy"
     )
     parser.add_argument(
         "--captions",
@@ -362,12 +376,12 @@ def main():
     create_webdataset_shards(
         obj_data=obj_data,
         gs_path=args.gs_path,
+        sphere2plane_path=args.sphere2plane_path,
         captions=captions_data,
         output_dir=args.output_dir,
         shard_size=args.shard_size,
         max_shards=args.max_shards
     )
-
 
 if __name__ == "__main__":
     main()

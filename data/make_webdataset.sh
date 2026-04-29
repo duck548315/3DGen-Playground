@@ -10,6 +10,7 @@ fi
 
 python make_webdataset.py \
     --gs_path $GS_PATH \
+    --sphere2plane_path $SPHERE_TO_PLANE \
     --captions $CAPTIONS_PATH \
     --output_dir $WEBDATASET_DIR \
     --obj_list $ALL_OBJ_JSON \
